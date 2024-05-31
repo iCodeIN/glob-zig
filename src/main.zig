@@ -3,25 +3,26 @@ const mem = std.mem;
 
 const open_flags = .{
     .access_sub_paths = true,
+    .iterate = true,
 };
 
 pub const Iterator = struct {
     allocator: mem.Allocator,
-    root: std.fs.IterableDir,
+    root: std.fs.Dir,
     segments: std.ArrayListUnmanaged([]const u8),
-    stack: std.ArrayListUnmanaged(std.fs.IterableDir.Iterator),
+    stack: std.ArrayListUnmanaged(std.fs.Dir.Iterator),
     components: std.ArrayListUnmanaged([]const u8),
     path: ?[]const u8,
     done: bool,
 
-    pub fn init(allocator: mem.Allocator, root: std.fs.IterableDir, pattern: []const u8) !Iterator {
+    pub fn init(allocator: mem.Allocator, root: std.fs.Dir, pattern: []const u8) !Iterator {
         if (pattern.len > 0 and pattern[0] == '/') return error.NoAbsolutePatterns;
 
         var ret = Iterator{
             .allocator = allocator,
             .root = root,
             .segments = std.ArrayListUnmanaged([]const u8){},
-            .stack = std.ArrayListUnmanaged(std.fs.IterableDir.Iterator){},
+            .stack = std.ArrayListUnmanaged(std.fs.Dir.Iterator){},
             .components = std.ArrayListUnmanaged([]const u8){},
             .path = null,
             .done = false,
@@ -84,11 +85,11 @@ pub const Iterator = struct {
         reset: while (true) {
             var it = &self.stack.items[i];
             while (try it.next()) |entry| {
-                if (entry.kind != .File and entry.kind != .Directory)
+                if (entry.kind != .file and entry.kind != .directory)
                     continue;
 
                 if (match(self.segments.items[i], entry.name)) switch (entry.kind) {
-                    .File => {
+                    .file => {
                         if (self.path) |path| {
                             self.allocator.free(path);
                             self.path = null;
@@ -99,9 +100,9 @@ pub const Iterator = struct {
                         _ = self.components.pop();
                         return self.path;
                     },
-                    .Directory => {
+                    .directory => {
                         if (i < self.segments.items.len - 1) {
-                            const dir = try it.dir.openIterableDir(entry.name, open_flags);
+                            const dir = try it.dir.openDir(entry.name, open_flags);
                             try self.stack.append(self.allocator, dir.iterate());
                             try self.components.append(self.allocator, entry.name);
                             i += 1;
@@ -120,7 +121,8 @@ pub const Iterator = struct {
 
             i -= 1;
             _ = self.components.pop();
-            self.stack.pop().dir.close();
+            var dir = self.stack.pop().dir;
+            dir.close();
         }
     }
 };
@@ -128,10 +130,10 @@ pub const Iterator = struct {
 pub fn copy(
     allocator: mem.Allocator,
     pattern: []const u8,
-    from: std.fs.IterableDir,
+    from: std.testing.TmpDir,
     to: std.fs.Dir,
 ) !void {
-    var it = try Iterator.init(allocator, from, pattern);
+    var it = try Iterator.init(allocator, from.dir, pattern);
     defer it.deinit();
 
     while (try it.next()) |subpath| {
@@ -248,12 +250,12 @@ fn copy_test(pattern: []const u8, fs: []const []const u8, expected: []const []co
     var dst = std.testing.tmpDir(open_flags);
     defer dst.cleanup();
 
-    try copy(std.testing.allocator, pattern, dir.iterable_dir, dst.dir);
+    try copy(std.testing.allocator, pattern, dir, dst.dir);
     try expect_fs(dst.dir, expected);
 }
 
-fn setup_fs(files: []const []const u8) !std.testing.TmpIterableDir {
-    var root = std.testing.tmpIterableDir(open_flags);
+fn setup_fs(files: []const []const u8) !std.testing.TmpDir {
+    var root = std.testing.tmpDir(open_flags);
     errdefer root.cleanup();
 
     for (files) |subpath| {
@@ -261,16 +263,16 @@ fn setup_fs(files: []const []const u8) !std.testing.TmpIterableDir {
 
         var buf: [std.mem.page_size]u8 = undefined;
         const path = blk: {
-            for (subpath) |c, i| buf[i] = if (c == '/') std.fs.path.sep else c;
+            for (subpath, 0..) |c, i| buf[i] = if (c == '/') std.fs.path.sep else c;
             break :blk buf[0..subpath.len];
         };
 
         const kind: std.fs.File.Kind = if (path[path.len - 1] == std.fs.path.sep)
-            .Directory
+            .directory
         else
-            .File;
+            .file;
 
-        try touch(root.iterable_dir.dir, path, kind);
+        try touch(root.dir, path, kind);
     }
 
     return root;
@@ -282,8 +284,8 @@ fn expect_fs(root: std.fs.Dir, expected: []const []const u8) !void {
 
 fn touch(root: std.fs.Dir, subpath: []const u8, kind: std.fs.File.Kind) !void {
     switch (kind) {
-        .Directory => try root.makeDir(subpath),
-        .File => {
+        .directory => try root.makeDir(subpath),
+        .file => {
             if (std.fs.path.dirname(subpath)) |dirname|
                 try root.makePath(dirname);
 
